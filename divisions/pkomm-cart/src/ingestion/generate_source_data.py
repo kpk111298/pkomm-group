@@ -14,9 +14,15 @@ from faker import Faker
 from src.utils.date_helpers import parse_yyyy_mm_dd, to_iso_dt
 
 fake = Faker()
-Faker.seed(42)
-random.seed(42)
-np.random.seed(42)
+
+
+def _seed_for_day(run_date: date) -> None:
+    """One seed per day: each day's data is different, and rerunning a day
+    gives exactly the same files, so any day can be replayed."""
+    seed = int(run_date.strftime("%Y%m%d"))
+    Faker.seed(seed)
+    random.seed(seed)
+    np.random.seed(seed % (2**32))
 
 
 @dataclass
@@ -42,6 +48,9 @@ CATEGORIES = ["Electronics", "Home", "Fashion", "Beauty", "Sports", "Grocery"]
 BRANDS = ["Acme", "Nova", "Zenith", "Pioneer", "Orbit", "Vertex"]
 
 ORDER_FLOW = ["PLACED", "CONFIRMED", "SHIPPED", "DELIVERED"]
+
+# How far back a late change can reach (payment retries, status changes)
+LATE_UPDATE_WINDOW_DAYS = 7
 
 
 def _safe_email() -> str:
@@ -285,15 +294,39 @@ def _read_csv_safe(p: Path, table_name: str):
 
 
 
-def _read_prev_day(prev_dir: Path) -> Optional[Dict[str, pd.DataFrame]]:
-    if not prev_dir.exists():
+STATE_KEYS = {
+    "customers": "customer_id",
+    "products": "product_id",
+    "orders": "order_id",
+    "order_items": "order_item_id",
+    "payments": "payment_id",
+    "shipments": "shipment_id",
+}
+
+
+def _read_state(source_root: Path, up_to: date) -> Optional[Dict[str, pd.DataFrame]]:
+    """
+    The store's database as it stood at the end of `up_to`: every earlier day's
+    drop, keeping the newest version of each record. Each day only sends what
+    was new or changed, so the previous day's file alone is not the full store
+    (day 2 sends no products, for example).
+    """
+    days = sorted(
+        d for d in source_root.glob("day=*")
+        if d.is_dir() and parse_yyyy_mm_dd(d.name[4:]) <= up_to
+    )
+    if not days:
         return None
     tables: Dict[str, pd.DataFrame] = {}
-    for name in ["customers", "products", "orders", "order_items", "payments", "shipments"]:
-        p = prev_dir / f"{name}.csv"
-        df = _read_csv_safe(p, name)
-        if df is not None:
-            tables[name] = df
+    for name, key in STATE_KEYS.items():
+        parts = [df for df in (_read_csv_safe(d / f"{name}.csv", name) for d in days) if df is not None and len(df)]
+        if not parts:
+            tables[name] = pd.DataFrame(columns=SCHEMA_COLUMNS.get(name, []))
+            continue
+        df = pd.concat(parts, ignore_index=True)
+        if "updated_at" in df.columns:
+            df = df.sort_values("updated_at", kind="stable")
+        tables[name] = df.drop_duplicates(subset=[key], keep="last").reset_index(drop=True)
     return tables if tables else None
 
 
@@ -305,44 +338,51 @@ def _apply_late_updates(run_date: date, cfg: VolumeConfig, prev: Dict[str, pd.Da
     We do NOT re-send full Day 1 history; we send only changed rows (realistic CDC-like drops).
     """
     updates: Dict[str, pd.DataFrame] = {}
+    pick = random.randint(0, 2**31 - 1)  # follows the day's seed, so picks differ each day
+    recent_from = (run_date - timedelta(days=LATE_UPDATE_WINDOW_DAYS)).isoformat()
+
+    def recent(df: pd.DataFrame) -> pd.DataFrame:
+        """Late changes only happen to recent records, like a payment retried within the week."""
+        return df[df["created_at"].astype(str) >= recent_from] if len(df) else df
 
     # Customers: small portion change segment/city with newer updated_at
     cust = prev.get("customers", pd.DataFrame()).copy()
     if len(cust) > 0:
         k = max(1, int(len(cust) * cfg.customer_update_rate))
-        sample = cust.sample(n=k, random_state=42).copy()
+        sample = cust.sample(n=k, random_state=pick).copy()
         sample["customer_segment"] = sample["customer_segment"].apply(lambda _: random.choice(["Regular", "VIP"]))
         sample["city"] = sample["city"].apply(lambda _: fake.city())
         sample["updated_at"] = sample["updated_at"].apply(lambda _: _rand_ts(run_date))
         updates["customers"] = sample
 
     # Orders: some status progresses
-    orders = prev.get("orders", pd.DataFrame()).copy()
+    orders = recent(prev.get("orders", pd.DataFrame())).copy()
+    orders = orders[~orders["order_status"].isin(["DELIVERED", "CANCELLED"])] if len(orders) else orders
     if len(orders) > 0:
         k = max(1, int(len(orders) * cfg.order_update_rate))
-        sample = orders.sample(n=k, random_state=7).copy()
+        sample = orders.sample(n=k, random_state=pick + 1).copy()
         sample["order_status"] = sample["order_status"].apply(_next_status)
         sample["updated_at"] = sample["updated_at"].apply(lambda _: _rand_ts(run_date))
         updates["orders"] = sample
 
     # Payments: some FAILED/AUTHORIZED become CAPTURED
-    pay = prev.get("payments", pd.DataFrame()).copy()
+    pay = recent(prev.get("payments", pd.DataFrame())).copy()
     if len(pay) > 0:
         candidates = pay[pay["payment_status"].isin(["FAILED", "AUTHORIZED"])].copy()
         if len(candidates) > 0:
             k = max(1, int(len(candidates) * cfg.payment_fix_rate))
-            sample = candidates.sample(n=min(k, len(candidates)), random_state=9).copy()
+            sample = candidates.sample(n=min(k, len(candidates)), random_state=pick + 2).copy()
             sample["payment_status"] = "CAPTURED"
             sample["updated_at"] = sample["updated_at"].apply(lambda _: _rand_ts(run_date))
             updates["payments"] = sample
 
     # Shipments: some IN_TRANSIT become DELIVERED with delivered_at
-    ship = prev.get("shipments", pd.DataFrame()).copy()
+    ship = recent(prev.get("shipments", pd.DataFrame())).copy()
     if len(ship) > 0:
         candidates = ship[ship["shipping_status"] == "IN_TRANSIT"].copy()
         if len(candidates) > 0:
             k = max(1, int(len(candidates) * cfg.shipment_update_rate))
-            sample = candidates.sample(n=min(k, len(candidates)), random_state=11).copy()
+            sample = candidates.sample(n=min(k, len(candidates)), random_state=pick + 3).copy()
             sample["shipping_status"] = "DELIVERED"
             sample["delivered_at"] = sample["delivered_at"].apply(lambda _: _rand_ts(run_date, 10, 23))
             sample["updated_at"] = sample["updated_at"].apply(lambda _: _rand_ts(run_date))
@@ -356,6 +396,7 @@ def _create_new_shipments_for_progressed_orders(
     cfg: VolumeConfig,
     prev: Dict[str, pd.DataFrame],
     order_updates: pd.DataFrame,
+    start_shipment_id: int,
 ) -> pd.DataFrame:
     """
     Create NEW shipment rows on Day 2 for some orders that got updated to SHIPPED.
@@ -369,15 +410,10 @@ def _create_new_shipments_for_progressed_orders(
         return pd.DataFrame()
 
     k = max(1, int(len(candidates) * cfg.new_shipments_rate))
-    chosen = candidates.sample(n=min(k, len(candidates)), random_state=13).copy()
-
-    # Start shipment_id after max from prev
-    max_sid = 0
-    if len(prev_ship) > 0:
-        max_sid = _max_numeric_id(prev_ship["shipment_id"], "S")
+    chosen = candidates.sample(n=min(k, len(candidates)), random_state=random.randint(0, 2**31 - 1)).copy()
 
     rows = []
-    sid = max_sid + 1
+    sid = start_shipment_id
     for _, r in chosen.iterrows():
         shipped_at = _rand_ts(run_date, 8, 18)
         ship_status = "IN_TRANSIT"
@@ -416,6 +452,7 @@ def main() -> None:
         raise SystemExit("Set RUN_DATE like: RUN_DATE=2026-01-02 python -m src.ingestion.generate_source_data")
 
     run_date = parse_yyyy_mm_dd(run_date_str)
+    _seed_for_day(run_date)
     cfg = VolumeConfig()
 
     prev_date_str = os.getenv("PREV_DATE", "").strip()
@@ -423,9 +460,7 @@ def main() -> None:
         prev_date_str = (run_date - timedelta(days=1)).isoformat()
 
     out_dir = Path("data/source") / f"day={run_date_str}"
-    prev_dir = Path("data/source") / f"day={prev_date_str}"
-
-    prev = _read_prev_day(prev_dir)
+    prev = _read_state(Path("data/source"), parse_yyyy_mm_dd(prev_date_str))
 
     if prev is None:
         # Day 1 behavior (fresh snapshot)
@@ -494,7 +529,8 @@ def main() -> None:
     # Late updates (update rows only)
     updates = _apply_late_updates(run_date, cfg, prev)
     order_updates = updates.get("orders", pd.DataFrame(columns=prev_orders.columns))
-    extra_shipments = _create_new_shipments_for_progressed_orders(run_date, cfg, prev, order_updates)
+    next_sid = max(max_ship, _max_numeric_id(new_shipments["shipment_id"], "S") if len(new_shipments) else 0) + 1
+    extra_shipments = _create_new_shipments_for_progressed_orders(run_date, cfg, prev, order_updates, next_sid)
 
     # Combine shipments: new shipments from new orders + extra shipments for progressed orders + shipment updates
     shipment_updates = updates.get("shipments", pd.DataFrame(columns=prev_shipments.columns))
