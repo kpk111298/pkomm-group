@@ -5,7 +5,9 @@
 
 # Pkomm Cart
 
-A fictional online store, part of [Pkomm Group](../../README.md). It sells across the US for now. The data is simulated; the pipeline and its tests are real.
+A fictional online store, part of [Pkomm Group](../../README.md). It sells across the US for now. The data is simulated. The pipeline and its tests are real.
+
+**Live dashboard:** [pkomm-group-cart.streamlit.app](https://pkomm-group-cart.streamlit.app). Pick any order date under How a Day's Revenue Settles and watch it settle. If the app has been asleep, it takes about 30 seconds to wake up.
 
 The point of this business is one hard problem: **records keep changing after they first arrive.** An order moves from placed to shipped to delivered. A payment fails, then goes through two days later. A pipeline that only looks at today's new rows gets the past wrong, and one that reloads everything every night gets slower forever.
 

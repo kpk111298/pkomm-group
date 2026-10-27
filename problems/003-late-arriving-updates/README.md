@@ -34,3 +34,5 @@ In `divisions/pkomm-cart`. Details in [incremental-strategy.md](../../divisions/
 
 ## Write-up
 [Monday's revenue went up on Thursday. Nothing was broken.](https://pkomm.com/blog/late-payments-change-past-revenue/) Two weeks of real runs, what the two easy pipelines get wrong, and how the merge keeps work flat as the data grows.
+
+Live dashboard: [pkomm-group-cart.streamlit.app](https://pkomm-group-cart.streamlit.app)

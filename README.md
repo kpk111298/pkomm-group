@@ -16,7 +16,7 @@ The businesses, customers and numbers are fictional and simulated. The code, tes
 | Business | What it does | Code |
 |---|---|---|
 | Pkomm Motors | Five car dealerships with service bays. Raw data in DuckDB, cleaned and modelled with dbt, 23 tests that gate the business tables, and a [live dashboard](https://pkomm-group.streamlit.app) with three role-based views and a Break it button | [divisions/pkomm-motors](divisions/pkomm-motors) |
-| Pkomm Cart | An online store whose orders, payments and shipments change for days after they're placed. A daily incremental pipeline that keeps the newest version of every record, with backfills | [divisions/pkomm-cart](divisions/pkomm-cart) |
+| Pkomm Cart | An online store whose orders, payments and shipments change for days after they're placed. A daily incremental pipeline that merges only the rows that changed, 9 end-to-end tests, and a [live dashboard](https://pkomm-group-cart.streamlit.app) that shows any past day's revenue settling | [divisions/pkomm-cart](divisions/pkomm-cart) |
 
 More businesses open one at a time, each when there's a real problem to solve in it.
 
