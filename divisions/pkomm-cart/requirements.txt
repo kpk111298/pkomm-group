@@ -4,3 +4,4 @@ faker==30.8.2
 duckdb==1.1.3
 pyarrow==17.0.0
 streamlit==1.39.0
+pytest==8.3.3
