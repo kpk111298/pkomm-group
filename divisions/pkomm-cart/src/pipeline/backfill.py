@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from datetime import timedelta
 
 from src.utils.date_helpers import parse_yyyy_mm_dd, daterange
 
 
-def _run(cmd: str) -> None:
-    rc = os.system(cmd)
+def _run(module: str, **env: str) -> None:
+    """Run one step as its own process, with the same Python that started this one."""
+    cmd = [sys.executable, "-m", module]
+    rc = subprocess.run(cmd, env={**os.environ, **env}).returncode
     if rc != 0:
-        raise SystemExit(f"Command failed: {cmd}")
+        shown = " ".join(f"{k}={v}" for k, v in env.items())
+        raise SystemExit(f"Command failed: {shown} python -m {module}")
 
 
 def main() -> None:
@@ -27,7 +32,7 @@ def main() -> None:
     for d in daterange(start_d, end_d):
         ds = d.isoformat()
         prev = (d - timedelta(days=1)).isoformat()
-        _run(f"RUN_DATE={ds} PREV_DATE={prev} python -m src.pipeline.run_daily")
+        _run("src.pipeline.run_daily", RUN_DATE=ds, PREV_DATE=prev)
 
     print(f"Backfill complete: {start} -> {end}")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import duckdb
@@ -8,10 +10,13 @@ import duckdb
 from src.utils.date_helpers import parse_yyyy_mm_dd
 
 
-def _run(cmd: str) -> None:
-    rc = os.system(cmd)
+def _run(module: str, **env: str) -> None:
+    """Run one step as its own process, with the same Python that started this one."""
+    cmd = [sys.executable, "-m", module]
+    rc = subprocess.run(cmd, env={**os.environ, **env}).returncode
     if rc != 0:
-        raise SystemExit(f"Command failed: {cmd}")
+        shown = " ".join(f"{k}={v}" for k, v in env.items())
+        raise SystemExit(f"Command failed: {shown} python -m {module}")
 
 
 def _record_pipeline_run(run_date: str, status: str, message: str = "") -> None:
@@ -45,16 +50,16 @@ def main() -> None:
 
     try:
         # 1) generate source (incremental day uses prev day)
-        _run(f"RUN_DATE={run_date_str} PREV_DATE={prev_date_str} python -m src.ingestion.generate_source_data")
+        _run("src.ingestion.generate_source_data", RUN_DATE=run_date_str, PREV_DATE=prev_date_str)
 
         # 2) bronze load
-        _run(f"RUN_DATE={run_date_str} python -m src.ingestion.load_bronze")
+        _run("src.ingestion.load_bronze", RUN_DATE=run_date_str)
 
         # 3) silver build for this batch
-        _run(f"BATCH_DATE={run_date_str} python -m src.transformations.build_silver")
+        _run("src.transformations.build_silver", BATCH_DATE=run_date_str)
 
         # 4) gold rebuild from silver (simple and reliable)
-        _run("python -m src.models.build_gold")
+        _run("src.models.build_gold")
 
         _record_pipeline_run(run_date_str, "SUCCESS", f"Completed pipeline for {run_date_str}")
         print(f"Pipeline complete for {run_date_str}")
