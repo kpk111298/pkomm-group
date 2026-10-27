@@ -52,7 +52,8 @@ def main() -> None:
         WITH item_totals AS (
             SELECT
                 order_id,
-                SUM(line_amount) AS order_gross_amount,
+                -- money as exact decimals, so totals never drift between runs
+                SUM(CAST(line_amount AS DECIMAL(14, 2))) AS order_gross_amount,
                 SUM(quantity) AS total_quantity,
                 COUNT(*) AS line_count
             FROM silver_order_items
@@ -63,7 +64,7 @@ def main() -> None:
                 order_id,
                 MAX_BY(payment_status, CAST(updated_at AS TIMESTAMP)) AS latest_payment_status,
                 MAX_BY(payment_method, CAST(updated_at AS TIMESTAMP)) AS latest_payment_method,
-                MAX(amount) AS payment_amount
+                MAX(CAST(amount AS DECIMAL(14, 2))) AS payment_amount
             FROM silver_payments
             GROUP BY order_id
         ),
@@ -89,7 +90,7 @@ def main() -> None:
             o.shipping_state,
             o.shipping_country,
 
-            COALESCE(it.order_gross_amount, 0) AS order_gross_amount,
+            COALESCE(it.order_gross_amount, CAST(0 AS DECIMAL(14, 2))) AS order_gross_amount,
             COALESCE(it.total_quantity, 0) AS total_quantity,
             COALESCE(it.line_count, 0) AS line_count,
 
@@ -118,6 +119,7 @@ def main() -> None:
                 order_date,
                 COUNT(*) AS orders_total,
                 SUM(order_gross_amount) AS gross_revenue,
+                SUM(CASE WHEN latest_payment_status = 'CAPTURED' THEN order_gross_amount ELSE CAST(0 AS DECIMAL(14, 2)) END) AS captured_revenue,
                 AVG(order_gross_amount) AS aov,
                 SUM(CASE WHEN order_status = 'CANCELLED' THEN 1 ELSE 0 END) AS orders_cancelled,
                 SUM(CASE WHEN latest_payment_status = 'FAILED' THEN 1 ELSE 0 END) AS payments_failed,
@@ -131,6 +133,7 @@ def main() -> None:
             order_date,
             orders_total,
             gross_revenue,
+            captured_revenue,
             ROUND(aov, 2) AS aov,
             orders_cancelled,
             payments_failed,

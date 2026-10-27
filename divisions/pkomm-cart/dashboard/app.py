@@ -40,6 +40,8 @@ def load_fact_orders() -> pd.DataFrame:
     ).df()
     con.close()
     df["order_date"] = pd.to_datetime(df["order_date"]).dt.date
+    # Money actually collected: the order's latest payment was captured
+    df["captured_amount"] = df["order_gross_amount"].where(df["latest_payment_status"] == "CAPTURED", 0.0)
     return df
 
 
@@ -150,6 +152,7 @@ else:
         g = facts_f.groupby("order_date", as_index=False).agg(
             orders_total=("order_id", "count"),
             gross_revenue=("order_gross_amount", "sum"),
+            captured_revenue=("captured_amount", "sum"),
             aov=("order_gross_amount", "mean"),
             orders_cancelled=("order_status", lambda s: (s == "CANCELLED").sum()),
             payments_failed=("latest_payment_status", lambda s: (s == "FAILED").sum()),
@@ -165,10 +168,11 @@ else:
         kpi_f = g.sort_values("order_date")
 
 # --- KPI Tiles
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col2b, col3, col4, col5 = st.columns(6)
 
 total_orders = int(facts_f["order_id"].nunique()) if not facts_f.empty else 0
 total_revenue = float(facts_f["order_gross_amount"].sum()) if not facts_f.empty else 0.0
+captured_revenue = float(facts_f["captured_amount"].sum()) if not facts_f.empty else 0.0
 aov = float(facts_f["order_gross_amount"].mean()) if not facts_f.empty else 0.0
 pay_fail_rate = float((facts_f["latest_payment_status"] == "FAILED").mean()) if not facts_f.empty else 0.0
 
@@ -178,6 +182,7 @@ delivery_rate = 0.0 if shipped == 0 else delivered / shipped
 
 col1.metric("Orders", f"{total_orders:,}")
 col2.metric("Gross Revenue", fmt_money(total_revenue))
+col2b.metric("Captured Revenue", fmt_money(captured_revenue), help="Orders whose latest payment was collected. Changes when a late payment comes through.")
 col3.metric("AOV", fmt_money(aov))
 col4.metric("Payment Fail Rate", fmt_pct(pay_fail_rate))
 col5.metric("Delivery Rate", fmt_pct(delivery_rate))
@@ -190,7 +195,7 @@ left, right = st.columns(2)
 with left:
     st.subheader("Revenue by Day")
     if not kpi_f.empty:
-        st.line_chart(kpi_f[["order_date", "gross_revenue"]].set_index("order_date"))
+        st.line_chart(kpi_f[["order_date", "gross_revenue", "captured_revenue"]].set_index("order_date"))
     else:
         st.info("No data for selected filters.")
 
