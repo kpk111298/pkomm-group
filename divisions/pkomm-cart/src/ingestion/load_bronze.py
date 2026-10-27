@@ -63,6 +63,9 @@ def load_day_to_bronze(run_date: str, db_path: str = "warehouse/ecomm.duckdb") -
             FROM read_csv_auto('{csv_path.as_posix()}') WHERE 1=0;
         """)
 
+        # Loading a day again replaces that day's rows instead of adding a second copy
+        con.execute(f"DELETE FROM {table_name} WHERE batch_date = ?", [run_date])
+
         # If empty file / no rows, just record 0 and continue
         if df.empty:
             results[t] = 0
