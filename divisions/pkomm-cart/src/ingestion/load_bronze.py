@@ -52,10 +52,15 @@ def load_day_to_bronze(run_date: str, db_path: str = "warehouse/ecomm.duckdb") -
 
         table_name = f"bronze_{t}"
 
-        # Ensure table exists (derive schema from bronze if already exists; else derive from file if non-empty)
+        # First load creates the table from the file's columns plus the three columns
+        # every bronze row carries, so the insert below always lines up.
         con.execute(f"""
             CREATE TABLE IF NOT EXISTS {table_name} AS
-            SELECT * FROM read_csv_auto('{csv_path.as_posix()}') WHERE 1=0;
+            SELECT *,
+                   CAST(NULL AS VARCHAR)   AS batch_date,
+                   CAST(NULL AS TIMESTAMP) AS ingested_at,
+                   CAST(NULL AS VARCHAR)   AS source_file
+            FROM read_csv_auto('{csv_path.as_posix()}') WHERE 1=0;
         """)
 
         # If empty file / no rows, just record 0 and continue
@@ -69,7 +74,7 @@ def load_day_to_bronze(run_date: str, db_path: str = "warehouse/ecomm.duckdb") -
         df["source_file"] = str(csv_path)
 
         con.register("df_tmp", df)
-        con.execute(f"INSERT INTO {table_name} SELECT * FROM df_tmp;")
+        con.execute(f"INSERT INTO {table_name} BY NAME SELECT * FROM df_tmp;")
 
         results[t] = len(df)
 
