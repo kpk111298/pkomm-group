@@ -25,12 +25,15 @@ Each day's folder holds only what was new or changed that day. To decide what ca
 ### Append-only table (order_items)
 - Insert new line items only. Items never change after an order is placed.
 
-The new version of each table is built in a temp table, then swapped in inside one transaction. If anything fails, silver stays as it was.
+Only the keys that are new or newer are replaced: a delete and insert of just those keys, inside one transaction. If anything fails, silver stays as it was. Every run writes what it received, inserted and updated to `pipeline_merge_log`, so a rerun shows up as a run that changed nothing.
 
 ## Gold: rebuilt from silver
 - `gold_fact_orders`: one row per order with its latest payment and shipping status.
 - `gold_kpi_daily`: daily numbers by order date. `gross_revenue` only changes when new orders arrive for that date. `captured_revenue` changes whenever a late payment lands, which is exactly the number finance saw moving.
+- `gold_kpi_history`: the daily numbers as they looked after every run, so you can watch a past day settle.
 - Money is `DECIMAL(14,2)`, so reruns give the same totals to the cent.
 
-## Known limit
-Silver rewrites each table from the merged result every run. That's fine at this size and easy to reason about, but it isn't a true `MERGE` that touches only changed rows. That's a later practice.
+## Known limits
+- Gold is rebuilt from silver every run. At this size that's fine. At scale, only the order dates touched by the batch should be rebuilt.
+- The DuckDB version pinned here has no `MERGE` statement, so the merge is a delete and insert in one transaction.
+- Hard deletes from the source aren't handled. Cancellations arrive as status changes.

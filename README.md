@@ -26,7 +26,7 @@ More businesses open one at a time, each when there's a real problem to solve in
 |---|---|---|---|
 | 001 | [Yesterday's sales changed overnight](problems/001-history-rewrites-itself) | Pkomm Motors | Open |
 | 002 | [The repo that grows every day](problems/002-database-in-git) | Pkomm Motors | Open |
-| 003 | [Late payments flip the revenue number](problems/003-late-arriving-updates) | Pkomm Cart | Fixed and tested, write-up next |
+| 003 | [Late payments flip the revenue number](problems/003-late-arriving-updates) | Pkomm Cart | Fixed, tested and written up |
 
 Every write-up follows the same [template](problems/_template.md): the problem, the fix, why this way, what went wrong, proof, honest limits, and how it would run on AWS, Azure, Snowflake or Databricks.
 

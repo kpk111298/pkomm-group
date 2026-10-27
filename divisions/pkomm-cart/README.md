@@ -24,8 +24,8 @@ The point of this business is one hard problem: **records keep changing after th
 |---|---|
 | Source | The store's system drops one folder per day with what was new or changed that day: customers, products, orders, order items, payments, shipments. Late changes reach back up to 7 days, like a payment retried within the week. Each day has its own seed, so any day can be regenerated exactly. |
 | Bronze | Every file loaded as it arrived, plus `batch_date`, `ingested_at` and `source_file`. Nothing is fixed here. Loading the same day again replaces that day's rows instead of adding a second copy. |
-| Silver | One row per business key, the newest version by `updated_at`. Orders, payments, shipments, customers and products are merged in; order items are append-only. Each table is swapped in a single transaction. |
-| Gold | `gold_fact_orders` (one row per order with its latest payment and shipping status) and `gold_kpi_daily`. Money is stored as exact decimals. |
+| Silver | One row per business key, the newest version by `updated_at`. Each run replaces only the keys that are new or newer, inside one transaction, and logs what it changed to `pipeline_merge_log`. Order items are append-only. |
+| Gold | `gold_fact_orders` (one row per order with its latest payment and shipping status), `gold_kpi_daily`, and `gold_kpi_history`, a snapshot of the daily numbers as of every run. Money is stored as exact decimals. |
 
 ## Daily numbers (`gold_kpi_daily`)
 
@@ -51,11 +51,11 @@ RUN_DATE=2026-01-26 python -m src.pipeline.run_daily
 # A range of days
 START_DATE=2026-01-01 END_DATE=2026-01-14 python -m src.pipeline.backfill
 
-# Dashboard
+# Dashboard (builds January 5 to 18 on first start if there's no warehouse yet)
 streamlit run dashboard/app.py
 ```
 
-Every run records itself in a `pipeline_runs` table, and the dashboard shows the last one.
+Every run records itself in `pipeline_runs`. The dashboard shows the daily numbers, how any past day's revenue settled run by run, and what each run inserted and updated.
 
 ## Tests
 
@@ -71,6 +71,9 @@ The tests copy the project into a temporary folder, run five days from an empty 
 - no source ID is ever reused for a different order
 - silver has one row per key, and it is always the newest version
 - a late payment changes past `captured_revenue`, and the new number matches a recount straight from the raw payments
-- rerunning a day changes nothing in any layer
+- rerunning a day changes nothing in any layer, and the run log shows 0 rows inserted or updated
+- the KPI history shows a past day settling, one snapshot per run
+
+Write-up with real numbers: [Monday's revenue went up on Thursday. Nothing was broken.](https://pkomm.com/blog/late-payments-change-past-revenue/)
 
 More detail: [incremental strategy](docs/incremental-strategy.md), [architecture](docs/architecture.md), [data dictionary](docs/data-dictionary.md).

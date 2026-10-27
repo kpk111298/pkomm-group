@@ -3,7 +3,7 @@
 **Division:** Pkomm Cart
 **Domain:** Incremental loading
 **Level:** 2
-**Status:** Fixed and tested, write-up next
+**Status:** Fixed, tested and written up
 
 ## Where I've seen this on the job
 At a Fortune 500 insurer, I loaded on-premises SQL Server data with watermark-based incremental loads, where records kept changing after the first load. At a national trucking company, log-based change data capture brought the same kind of late updates into Snowflake. Pkomm Cart is a small, public version of that problem.
@@ -17,7 +17,7 @@ Nothing, as long as it moves for the right reason. Payments that failed on Monda
 ## The fix
 In `divisions/pkomm-cart`. Details in [incremental-strategy.md](../../divisions/pkomm-cart/docs/incremental-strategy.md).
 - Bronze keeps every file as it arrived. Rerunning a day replaces that day instead of doubling it.
-- Silver keeps one row per business key, the newest by `updated_at`, swapped in inside one transaction.
+- Silver keeps one row per business key, the newest by `updated_at`. Each run replaces only the keys that changed, inside one transaction.
 - `order_items` stays append-only.
 - Gold splits revenue in two: `gross_revenue` (every order placed) and `captured_revenue` (orders whose latest payment was collected). Only the second one should move.
 
@@ -30,8 +30,7 @@ In `divisions/pkomm-cart`. Details in [incremental-strategy.md](../../divisions/
 - Revenue differed by tiny fractions between reruns, because money was stored as floats.
 
 ## Tests
-`divisions/pkomm-cart/tests/test_pipeline.py` runs five days from an empty warehouse and checks a fresh start, replayable days, no reused IDs, newest-version silver, late payments matching a recount from raw, and that a rerun changes nothing.
+`divisions/pkomm-cart/tests/test_pipeline.py` (9 tests) runs five days from an empty warehouse and checks a fresh start, replayable days, no reused IDs, newest-version silver, late payments matching a recount from raw, and that a rerun changes nothing.
 
-## Still to do
-- Before and after numbers for the write-up.
-- AWS, Azure, Snowflake and Databricks table.
+## Write-up
+[Monday's revenue went up on Thursday. Nothing was broken.](https://pkomm.com/blog/late-payments-change-past-revenue/) Two weeks of real runs, what the two easy pipelines get wrong, and how the merge keeps work flat as the data grows.
