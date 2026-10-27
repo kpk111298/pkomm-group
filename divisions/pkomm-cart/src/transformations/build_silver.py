@@ -76,9 +76,15 @@ def build_silver_upsert(con: duckdb.DuckDBPyConnection, table: str, pk: str, upd
         WHERE rn = 1;
     """)
 
-    # Now safe to replace silver table content
-    con.execute(f"DELETE FROM silver_{table};")
-    con.execute(f"INSERT INTO silver_{table} SELECT * FROM tmp_merged_{table};")
+    # Swap in the merged snapshot in one transaction, so a crash can't leave silver empty
+    con.execute("BEGIN TRANSACTION;")
+    try:
+        con.execute(f"DELETE FROM silver_{table};")
+        con.execute(f"INSERT INTO silver_{table} SELECT * FROM tmp_merged_{table};")
+        con.execute("COMMIT;")
+    except Exception:
+        con.execute("ROLLBACK;")
+        raise
 
     return {"incoming_rows": int(incoming), "inserts": int(inserts), "updates": int(updates)}
 
