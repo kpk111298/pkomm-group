@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import altair as alt
@@ -21,7 +23,7 @@ DEMO_START, DEMO_END = "2026-01-05", "2026-01-18"
 
 @st.cache_data(ttl=30)
 def load_kpi_daily() -> pd.DataFrame:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    con = connect_read_only()
     df = con.execute("SELECT * FROM gold_kpi_daily ORDER BY order_date").df()
     con.close()
     df["order_date"] = pd.to_datetime(df["order_date"]).dt.date
@@ -30,7 +32,7 @@ def load_kpi_daily() -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_fact_orders() -> pd.DataFrame:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    con = connect_read_only()
     df = con.execute(
         """
         SELECT
@@ -57,7 +59,7 @@ def load_fact_orders() -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_ops_metadata() -> dict:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    con = connect_read_only()
 
     # Data through = max KPI date
     data_through = con.execute("SELECT MAX(order_date) FROM gold_kpi_daily").fetchone()[0]
@@ -86,6 +88,17 @@ def load_ops_metadata() -> dict:
     }
 
 
+def connect_read_only() -> duckdb.DuckDBPyConnection:
+    """Open the warehouse for reading. If a pipeline run holds the lock, wait a moment and try again."""
+    for attempt in range(20):
+        try:
+            return duckdb.connect(DB_PATH, read_only=True)
+        except duckdb.IOException:
+            if attempt == 19:
+                raise
+            time.sleep(1)
+
+
 def _table_exists(con, name: str) -> bool:
     return con.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
@@ -94,7 +107,7 @@ def _table_exists(con, name: str) -> bool:
 
 @st.cache_data(ttl=30)
 def load_kpi_history() -> pd.DataFrame:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    con = connect_read_only()
     if not _table_exists(con, "gold_kpi_history"):
         con.close()
         return pd.DataFrame()
@@ -114,7 +127,7 @@ def load_kpi_history() -> pd.DataFrame:
 
 @st.cache_data(ttl=30)
 def load_merge_log() -> pd.DataFrame:
-    con = duckdb.connect(DB_PATH, read_only=True)
+    con = connect_read_only()
     if not _table_exists(con, "pipeline_merge_log"):
         con.close()
         return pd.DataFrame()
@@ -158,9 +171,28 @@ st.set_page_config(page_title=f"{COMPANY_NAME} | Incremental Analytics", layout=
 st.title(f"{COMPANY_NAME} Analytics")
 st.caption(f"{COMPANY_NAME} is a fictional company. All data is simulated.")
 
-def build_demo_warehouse() -> None:
-    (PROJECT / "warehouse").mkdir(exist_ok=True)
+READY_MARKER = PROJECT / "warehouse" / ".demo_ready"
+BUILDING_MARKER = PROJECT / "warehouse" / ".demo_building"
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_demo_warehouse() -> str:
+    """
+    Build the demo data once per server, even when several visitors arrive at the same time.
+    Streamlit runs this function once and makes every other session wait for it, so nobody
+    tries to read the warehouse while the pipeline is still writing to it.
+    Returns an empty string on success, or the error output if the build failed.
+    """
+    if READY_MARKER.exists():
+        return ""
+
+    # Start clean, in case an earlier start stopped halfway
+    shutil.rmtree(PROJECT / "warehouse", ignore_errors=True)
+    shutil.rmtree(PROJECT / "data" / "source", ignore_errors=True)
+    (PROJECT / "warehouse").mkdir(parents=True, exist_ok=True)
     (PROJECT / "data" / "source").mkdir(parents=True, exist_ok=True)
+    BUILDING_MARKER.touch()
+
     result = subprocess.run(
         [sys.executable, "-m", "src.pipeline.backfill"],
         cwd=PROJECT,
@@ -169,14 +201,40 @@ def build_demo_warehouse() -> None:
         text=True,
     )
     if result.returncode != 0:
-        st.error("The first build failed.")
-        st.code(result.stdout[-3000:] + result.stderr[-3000:])
-        st.stop()
+        return (result.stdout[-3000:] + result.stderr[-3000:]) or "Pipeline exited with an error."
+
+    READY_MARKER.touch()
+    BUILDING_MARKER.unlink(missing_ok=True)
+    return ""
 
 
-if not Path(DB_PATH).exists():
+def warehouse_is_usable() -> bool:
+    """True when there is a finished warehouse we can read, for example one built locally."""
+    if READY_MARKER.exists():
+        return True
+    if BUILDING_MARKER.exists() or not Path(DB_PATH).exists():
+        # The pipeline is still writing between days, so wait for it
+        return False
+    try:
+        con = connect_read_only()
+        try:
+            con.execute("SELECT COUNT(*) FROM gold_kpi_daily").fetchone()
+        finally:
+            con.close()
+        return True
+    except Exception:
+        # Locked by a build that is still running, or left half built
+        return False
+
+
+if not warehouse_is_usable():
     with st.spinner(f"First start: running the daily pipeline for {DEMO_START} to {DEMO_END}. This takes about a minute."):
-        build_demo_warehouse()
+        error = ensure_demo_warehouse()
+    if error:
+        ensure_demo_warehouse.clear()
+        st.error("The first build failed. Refresh the page to try again.")
+        st.code(error)
+        st.stop()
     st.cache_data.clear()
 
 ops = load_ops_metadata()
