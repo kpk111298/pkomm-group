@@ -3,25 +3,35 @@
 **Division:** Pkomm Cart
 **Domain:** Incremental loading
 **Level:** 2
-**Status:** Fixed, needs tests and write-up
+**Status:** Fixed and tested, write-up next
 
 ## Where I've seen this on the job
 At a Fortune 500 insurer, I loaded on-premises SQL Server data with watermark-based incremental loads, where records kept changing after the first load. At a national trucking company, log-based change data capture brought the same kind of late updates into Snowflake. Pkomm Cart is a small, public version of that problem.
 
 ## The ticket
-Finance: Monday's revenue looked fine on Monday. By Thursday it was lower. Why does the past keep moving?
+Finance: Monday's collected revenue looked one way on Monday. By Thursday it was higher. Why does the past keep moving?
 
 ## What is actually wrong
-Orders, payments and shipments change after they first arrive. A payment fails, then succeeds two days later. A naive daily load either misses the update or counts the record twice.
+Nothing, as long as it moves for the right reason. Payments that failed on Monday go through later in the week, so Monday's collected revenue really does go up. The real risks are a load that misses those late updates, or one that counts the same record twice.
 
 ## The fix
-Already built in `divisions/pkomm-cart`. See [incremental-strategy.md](../../divisions/pkomm-cart/docs/incremental-strategy.md).
-- Bronze stays append-only, so nothing is lost.
-- Silver upserts by business key and keeps a record only if its `updated_at` is newer.
+In `divisions/pkomm-cart`. Details in [incremental-strategy.md](../../divisions/pkomm-cart/docs/incremental-strategy.md).
+- Bronze keeps every file as it arrived. Rerunning a day replaces that day instead of doubling it.
+- Silver keeps one row per business key, the newest by `updated_at`, swapped in inside one transaction.
 - `order_items` stays append-only.
-- Empty files are handled safely, and `backfill.py` replays a date range.
+- Gold splits revenue in two: `gross_revenue` (every order placed) and `captured_revenue` (orders whose latest payment was collected). Only the second one should move.
+
+## Bugs found while testing
+- A fresh start failed, because bronze tables were created without their load columns.
+- Rerunning a day doubled bronze.
+- Day 3 had no revenue and no line items, because the generator only looked at the day before and that day had no new products.
+- New and extra shipments could get the same ID.
+- Every day had the same number of orders, because the seed never changed.
+- Revenue differed by tiny fractions between reruns, because money was stored as floats.
+
+## Tests
+`divisions/pkomm-cart/tests/test_pipeline.py` runs five days from an empty warehouse and checks a fresh start, replayable days, no reused IDs, newest-version silver, late payments matching a recount from raw, and that a rerun changes nothing.
 
 ## Still to do
-- Add tests (the `tests/` folder is empty).
 - Before and after numbers for the write-up.
-- AWS and Azure table.
+- AWS, Azure, Snowflake and Databricks table.
