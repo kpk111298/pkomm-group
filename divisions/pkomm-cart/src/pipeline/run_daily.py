@@ -58,8 +58,8 @@ def main() -> None:
         # 3) silver build for this batch
         _run("src.transformations.build_silver", BATCH_DATE=run_date_str)
 
-        # 4) gold rebuild from silver (simple and reliable)
-        _run("src.models.build_gold")
+        # 4) gold rebuild from silver, plus a snapshot of the KPIs as of this run
+        _run("src.models.build_gold", RUN_DATE=run_date_str)
 
         _record_pipeline_run(run_date_str, "SUCCESS", f"Completed pipeline for {run_date_str}")
         print(f"Pipeline complete for {run_date_str}")

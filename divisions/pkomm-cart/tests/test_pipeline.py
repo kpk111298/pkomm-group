@@ -187,3 +187,26 @@ def test_rerunning_a_day_changes_nothing(runs):
 
     assert table_counts(workdir) == before_counts
     assert query(workdir, "SELECT * FROM gold_kpi_daily ORDER BY order_date") == before_kpi
+
+    # The run log shows the rerun touched nothing in silver
+    last_run = query(workdir, """
+        SELECT SUM(inserts), SUM(updates) FROM pipeline_merge_log
+        WHERE run_started_at = (SELECT MAX(run_started_at) FROM pipeline_merge_log)
+    """)[0]
+    assert last_run == (0, 0), f"rerun changed silver: {last_run}"
+
+
+def test_history_shows_a_past_day_settling(runs):
+    workdir, snaps = runs
+    day1 = DAYS[0]
+    history = dict(query(workdir, f"""
+        SELECT CAST(as_of_date AS VARCHAR), captured_revenue
+        FROM gold_kpi_history WHERE order_date = DATE '{day1}'
+    """))
+    # one snapshot per run, each matching what gold showed at that moment
+    assert list(history) == DAYS
+    for day in DAYS:
+        assert history[day] == snaps[day]["kpi"][day1]
+    # and collected revenue for that day never goes down
+    values = [history[d] for d in DAYS]
+    assert values == sorted(values)

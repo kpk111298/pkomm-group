@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import altair as alt
 import duckdb
 import pandas as pd
 import streamlit as st
 
 
-DB_PATH = "warehouse/ecomm.duckdb"
+PROJECT = Path(__file__).resolve().parent.parent
+DB_PATH = str(PROJECT / "warehouse" / "ecomm.duckdb")
 COMPANY_NAME = "Pkomm Cart"
+
+# Two weeks of data, built on first start when there is no warehouse yet (for example on a fresh deploy)
+DEMO_START, DEMO_END = "2026-01-05", "2026-01-18"
 
 
 @st.cache_data(ttl=30)
@@ -76,10 +86,66 @@ def load_ops_metadata() -> dict:
     }
 
 
+def _table_exists(con, name: str) -> bool:
+    return con.execute(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
+    ).fetchone()[0] > 0
+
+
+@st.cache_data(ttl=30)
+def load_kpi_history() -> pd.DataFrame:
+    con = duckdb.connect(DB_PATH, read_only=True)
+    if not _table_exists(con, "gold_kpi_history"):
+        con.close()
+        return pd.DataFrame()
+    df = con.execute("""
+        SELECT as_of_date, order_date,
+               CAST(gross_revenue AS DOUBLE) AS gross_revenue,
+               CAST(captured_revenue AS DOUBLE) AS captured_revenue,
+               payments_failed
+        FROM gold_kpi_history
+        ORDER BY order_date, as_of_date
+    """).df()
+    con.close()
+    df["as_of_date"] = pd.to_datetime(df["as_of_date"]).dt.date
+    df["order_date"] = pd.to_datetime(df["order_date"]).dt.date
+    return df
+
+
+@st.cache_data(ttl=30)
+def load_merge_log() -> pd.DataFrame:
+    con = duckdb.connect(DB_PATH, read_only=True)
+    if not _table_exists(con, "pipeline_merge_log"):
+        con.close()
+        return pd.DataFrame()
+    df = con.execute("""
+        SELECT batch_date,
+               run_started_at AS run_at,
+               SUM(incoming_rows) AS rows_received,
+               SUM(inserts) AS rows_inserted,
+               SUM(updates) AS rows_updated,
+               SUM(CASE WHEN table_name <> 'order_items' THEN silver_rows_after ELSE 0 END) AS silver_rows
+        FROM pipeline_merge_log
+        GROUP BY batch_date, run_started_at
+        ORDER BY run_at DESC
+    """).df()
+    con.close()
+    return df
+
+
 def fmt_money(x: float) -> str:
     if pd.isna(x):
         return "$0"
     return f"${x:,.2f}"
+
+
+def fmt_money_short(x: float) -> str:
+    """For the tiles at the top, where a full number with cents gets cut off."""
+    if pd.isna(x):
+        return "$0"
+    if abs(x) >= 1_000_000:
+        return f"${x / 1_000_000:,.2f}M"
+    return f"${x:,.0f}"
 
 
 def fmt_pct(x: float) -> str:
@@ -92,6 +158,27 @@ st.set_page_config(page_title=f"{COMPANY_NAME} | Incremental Analytics", layout=
 st.title(f"{COMPANY_NAME} Analytics")
 st.caption(f"{COMPANY_NAME} is a fictional company. All data is simulated.")
 
+def build_demo_warehouse() -> None:
+    (PROJECT / "warehouse").mkdir(exist_ok=True)
+    (PROJECT / "data" / "source").mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "src.pipeline.backfill"],
+        cwd=PROJECT,
+        env={**os.environ, "START_DATE": DEMO_START, "END_DATE": DEMO_END},
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        st.error("The first build failed.")
+        st.code(result.stdout[-3000:] + result.stderr[-3000:])
+        st.stop()
+
+
+if not Path(DB_PATH).exists():
+    with st.spinner(f"First start: running the daily pipeline for {DEMO_START} to {DEMO_END}. This takes about a minute."):
+        build_demo_warehouse()
+    st.cache_data.clear()
+
 ops = load_ops_metadata()
 
 # Small ops strip
@@ -102,8 +189,8 @@ if ops["last_run"] is None:
     ops_col3.caption("Pipeline status: n/a")
 else:
     run_date, run_ts, status = ops["last_run"]
-    ops_col2.caption(f"Last pipeline run: {run_ts}")
-    ops_col3.caption(f"Pipeline status: {status} (run_date={run_date})")
+    ops_col2.caption(f"Last pipeline run: {run_ts:%Y-%m-%d %H:%M}")
+    ops_col3.caption(f"Last batch: {run_date} ({status.lower()})")
 
 st.divider()
 
@@ -181,9 +268,9 @@ delivered = (facts_f["latest_shipping_status"] == "DELIVERED").sum() if not fact
 delivery_rate = 0.0 if shipped == 0 else delivered / shipped
 
 col1.metric("Orders", f"{total_orders:,}")
-col2.metric("Gross Revenue", fmt_money(total_revenue))
-col2b.metric("Captured Revenue", fmt_money(captured_revenue), help="Orders whose latest payment was collected. Changes when a late payment comes through.")
-col3.metric("AOV", fmt_money(aov))
+col2.metric("Gross Revenue", fmt_money_short(total_revenue))
+col2b.metric("Captured", fmt_money_short(captured_revenue), help="Orders whose latest payment was collected. Changes when a late payment comes through.")
+col3.metric("AOV", fmt_money_short(aov))
 col4.metric("Payment Fail Rate", fmt_pct(pay_fail_rate))
 col5.metric("Delivery Rate", fmt_pct(delivery_rate))
 
@@ -221,6 +308,77 @@ with mid2:
         st.line_chart(kpi_f[["order_date", "delivery_rate"]].set_index("order_date"))
     else:
         st.info("No data for selected filters.")
+
+st.divider()
+
+# --- How a past day settles
+st.subheader("How a Day's Revenue Settles")
+st.caption(
+    "Gross revenue for a day is fixed once its orders are in. Captured revenue keeps rising "
+    "for about a week as failed or pending payments go through. Each point is the number "
+    "as it looked after that day's pipeline run."
+)
+hist = load_kpi_history()
+if hist.empty:
+    st.info("No history yet. It fills in as the daily pipeline runs.")
+else:
+    days_with_history = sorted(hist["order_date"].unique().tolist())
+    pick = st.selectbox("Order date", days_with_history, index=0)
+    h = hist[hist["order_date"] == pick].set_index("as_of_date")
+    first, last = h.iloc[0], h.iloc[-1]
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Gross revenue", fmt_money(last["gross_revenue"]))
+    s2.metric(
+        "Captured on the day",
+        fmt_money(first["captured_revenue"]),
+        help="What finance would have seen the morning after.",
+    )
+    s3.metric(
+        "Captured now",
+        fmt_money(last["captured_revenue"]),
+        delta=fmt_money(last["captured_revenue"] - first["captured_revenue"]),
+    )
+    chart_df = (
+        h[["gross_revenue", "captured_revenue"]]
+        .rename(columns={"gross_revenue": "Gross", "captured_revenue": "Captured"})
+        .reset_index()
+        .melt(id_vars="as_of_date", var_name="Revenue", value_name="Amount")
+    )
+    chart_df["as_of_date"] = pd.to_datetime(chart_df["as_of_date"])
+    st.altair_chart(
+        alt.Chart(chart_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("as_of_date:T", title="As of the run on", axis=alt.Axis(format="%b %d")),
+            y=alt.Y("Amount:Q", title="Revenue ($)", scale=alt.Scale(zero=False), axis=alt.Axis(format="$~s")),
+            color=alt.Color("Revenue:N", legend=alt.Legend(orient="bottom", title=None)),
+            tooltip=[alt.Tooltip("as_of_date:T", title="As of", format="%b %d"), "Revenue:N", alt.Tooltip("Amount:Q", format="$,.2f")],
+        )
+        .properties(height=320, padding={"left": 70, "right": 12, "top": 8, "bottom": 8}),
+        use_container_width=True,
+    )
+
+st.divider()
+
+# --- What each run changed
+st.subheader("What Each Run Changed")
+st.caption(
+    "Silver only replaces rows that are new or have a newer version. A rerun of the same day "
+    "shows up here with nothing inserted or updated."
+)
+log = load_merge_log()
+if log.empty:
+    st.info("No runs logged yet.")
+else:
+    shown = log.head(30).rename(columns={
+        "batch_date": "Batch",
+        "run_at": "Run at",
+        "rows_received": "Rows received",
+        "rows_inserted": "New rows",
+        "rows_updated": "Updated rows",
+        "silver_rows": "Silver rows after",
+    })
+    st.dataframe(shown, use_container_width=True, hide_index=True)
 
 st.divider()
 

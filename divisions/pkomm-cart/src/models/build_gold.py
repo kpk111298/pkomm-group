@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import duckdb
 
 
@@ -145,6 +147,32 @@ def main() -> None:
         FROM base
         ORDER BY order_date;
     """)
+
+    # ----------------------------
+    # KPI history: what each day's numbers looked like as of every run.
+    # This is what shows a past day settling as late payments land.
+    # ----------------------------
+    as_of = os.getenv("RUN_DATE", "").strip()
+    if as_of:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS gold_kpi_history (
+                as_of_date DATE,
+                order_date DATE,
+                orders_total BIGINT,
+                gross_revenue DECIMAL(14, 2),
+                captured_revenue DECIMAL(14, 2),
+                payments_failed BIGINT
+            );
+        """)
+        con.execute("BEGIN TRANSACTION;")
+        con.execute("DELETE FROM gold_kpi_history WHERE as_of_date = CAST(? AS DATE);", [as_of])
+        con.execute("""
+            INSERT INTO gold_kpi_history
+            SELECT CAST(? AS DATE), order_date, orders_total, gross_revenue, captured_revenue, payments_failed
+            FROM gold_kpi_daily
+            WHERE order_date <= CAST(? AS DATE);
+        """, [as_of, as_of])
+        con.execute("COMMIT;")
 
     # Simple confirmation prints
     kpi_rows = con.execute("select count(*) from gold_kpi_daily").fetchone()[0]
