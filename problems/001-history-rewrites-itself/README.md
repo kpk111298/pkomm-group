@@ -3,13 +3,15 @@
 **Division:** Pkomm Motors
 **Domain:** Incremental loading
 **Level:** 2
-**Status:** Fixed and tested, write-up next
+**Status:** Fixed, tested and written up
 
 ## Where I've seen this on the job
 At a national trucking company, I built raw, cleaned and reporting layers so analysts only query validated data, and closed days have to stay closed. This problem is what happens when the raw layer gets rebuilt instead of appended to.
 
 ## The ticket
-The Chicago branch manager: Last Tuesday showed 6 cars sold on Wednesday morning. Today the same Tuesday shows 3. ## What was actually wrong
+The Chicago branch manager: Last Tuesday showed 3 cars sold on Wednesday morning. Today the same Tuesday shows 1. Which number do I report?
+
+## What was actually wrong
 Two things, one loud and one quiet.
 
 1. **The source rebuilt history.** `data_generator/generate_data.py` used `random.seed(None)` and rebuilt the last 90 days of sales on every run, and bronze was reloaded from scratch. Ten runs of it gave Chicago's Tuesday, November 10 as 0, 1 or 3 cars, and the revenue for everything before November 1 swung from $16.57M to $18.38M. Between two runs, 79 of 91 days had a different number of cars sold. It also sold the same car up to 16 times in one run, because a sold car never left the lot.
@@ -39,4 +41,6 @@ In `divisions/pkomm-motors`.
 `divisions/pkomm-motors/tests/test_closed_days.py` (8 tests) builds the history from nothing and checks: every dbt test passes, the same day comes out the same, the next night changes no closed day, rerunning an open day doesn't double it, a closed day can't be loaded again, a closed day changed behind the loader's back stops the business tables, no model reads the clock, and the dealership behaves like one.
 
 ## Write-up
-To do.
+[Yesterday's numbers should never change](https://pkomm.com/blog/a-closed-day-stays-closed/). Before and after numbers from real runs, the four rules, and the Rewrite the past button.
+
+Live dashboard: [pkomm-group.streamlit.app](https://pkomm-group.streamlit.app)
