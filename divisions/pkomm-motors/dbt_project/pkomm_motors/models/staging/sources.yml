@@ -10,9 +10,18 @@ sources:
       - name: employees
         description: "All salespeople and service technicians across all branches"
       - name: vehicles
-        description: "Vehicle inventory across all locations"
+        description: "Lot changes from the dealer system: cars arriving and cars sold. One row per change, so a car can appear more than once"
       - name: sales_transactions
-        description: "Every car sale transaction"
+        description: "Every car sale, appended one business day at a time (_batch_date)"
       - name: service_jobs
         description: "Every service center job completed"
         
+
+  - name: control
+    schema: control
+    description: "Bookkeeping for closed days. Written by the loader, never by dbt"
+    tables:
+      - name: closed_days
+        description: "Business days that are closed and can no longer change"
+      - name: closed_day_totals
+        description: "Units and revenue per branch for each closed day, recorded the moment it closed"

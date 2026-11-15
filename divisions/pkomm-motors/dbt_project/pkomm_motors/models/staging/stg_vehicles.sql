@@ -4,7 +4,13 @@
 
 WITH source AS (
 
+    -- The dealer system sends a row every time a car changes (arrives, sells).
+    -- Keep the newest version of each car.
     SELECT * FROM {{ source('bronze', 'vehicles') }}
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY vehicle_id
+        ORDER BY updated_at DESC, _ingested_at DESC
+    ) = 1
 
 ),
 
@@ -22,6 +28,8 @@ cleaned AS (
         ROUND(list_price, 2) AS list_price,
         LOWER(status) AS status,
         location_id,
+        CAST(received_date AS DATE) AS received_date,
+        CAST(updated_at AS TIMESTAMP) AS updated_at,
 
         -- Flag premium vehicles (above 50k)
         CASE
@@ -29,6 +37,7 @@ cleaned AS (
             ELSE FALSE
         END AS is_premium,
 
+        _batch_date,
         _ingested_at,
         _source_file
 

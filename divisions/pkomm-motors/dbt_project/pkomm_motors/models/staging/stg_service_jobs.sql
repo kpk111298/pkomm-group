@@ -33,6 +33,7 @@ cleaned AS (
         -- Efficiency ratio: how close to estimate did they finish
         ROUND(actual_hours / NULLIF(estimated_hours, 0), 2) AS efficiency_ratio,
 
+        _batch_date,
         _ingested_at,
         _source_file
 

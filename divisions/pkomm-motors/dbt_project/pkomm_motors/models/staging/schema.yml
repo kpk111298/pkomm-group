@@ -19,6 +19,10 @@ models:
 
   - name: stg_sales_transactions
     description: "Cleaned sales transactions with date parts extracted"
+    tests:
+      # A closed day stays closed: its units and revenue per branch must match
+      # what was recorded when it closed (control.closed_day_totals)
+      - closed_days_unchanged
     columns:
       - name: transaction_id
         tests:

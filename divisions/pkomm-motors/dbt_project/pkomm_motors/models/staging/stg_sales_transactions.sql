@@ -37,6 +37,7 @@ cleaned AS (
             ELSE FALSE
         END AS is_high_value_sale,
 
+        _batch_date,
         _ingested_at,
         _source_file
 

@@ -16,10 +16,18 @@ locations AS (
 ),
 
 -- Get only this month's sales
+-- Month to date as of the latest business day in the data, not the server's clock.
+-- With CURRENT_DATE, the same closed days gave a different answer every morning.
+as_of AS (
+
+    SELECT MAX(sale_date_only) AS d FROM sales
+
+),
+
 monthly_sales AS (
 
     SELECT * FROM sales
-    WHERE sale_month = DATE_TRUNC('month', CURRENT_DATE)
+    WHERE sale_month = DATE_TRUNC('month', (SELECT d FROM as_of))
 
 ),
 
@@ -36,11 +44,11 @@ location_revenue AS (
         ROUND(COALESCE(SUM(s.sale_price), 0), 2) AS revenue_to_date,
 
         -- How many days into the month are we
-        EXTRACT(DAY FROM CURRENT_DATE) AS days_elapsed,
+        EXTRACT(DAY FROM (SELECT d FROM as_of)) AS days_elapsed,
 
         -- How many total days in this month
         EXTRACT(DAY FROM 
-            (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day')
+            (DATE_TRUNC('month', (SELECT d FROM as_of)) + INTERVAL '1 month' - INTERVAL '1 day')
         ) AS days_in_month
 
     FROM locations l

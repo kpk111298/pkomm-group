@@ -24,7 +24,8 @@ locations AS (
 recent_jobs AS (
 
     SELECT * FROM jobs
-    WHERE job_date_only >= CURRENT_DATE - INTERVAL '7 days'
+    -- Last 7 days as of the latest business day in the data, not the server's clock
+    WHERE job_date_only > (SELECT MAX(job_date_only) FROM jobs) - INTERVAL '7 days'
 
 ),
 

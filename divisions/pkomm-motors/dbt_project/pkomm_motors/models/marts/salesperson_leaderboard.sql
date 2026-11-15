@@ -25,7 +25,8 @@ locations AS (
 recent_sales AS (
 
     SELECT * FROM sales
-    WHERE sale_date_only >= CURRENT_DATE - INTERVAL '7 days'
+    -- Last 7 days as of the latest business day in the data, not the server's clock
+    WHERE sale_date_only > (SELECT MAX(sale_date_only) FROM sales) - INTERVAL '7 days'
 
 ),
 
