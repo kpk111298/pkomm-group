@@ -11,7 +11,7 @@ import html
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import duckdb
 import pandas as pd
@@ -136,6 +136,27 @@ def built_at():
     return pd.to_datetime(one("SELECT MAX(_ingested_at) FROM main_silver.stg_sales_transactions"))
 
 
+def closed_days(path=None):
+    """Closed business days and their total units, oldest first."""
+    con = duckdb.connect(path or active_db(), read_only=True)
+    try:
+        return con.execute("""
+            SELECT c.business_date, COALESCE(SUM(t.units_sold), 0) AS units
+            FROM control.closed_days c
+            LEFT JOIN control.closed_day_totals t ON t.business_date = c.business_date
+            GROUP BY 1 ORDER BY 1""").df()
+    finally:
+        con.close()
+
+
+def loaded_days(path=None):
+    con = duckdb.connect(path or active_db(), read_only=True)
+    try:
+        return [r[0] for r in con.execute("SELECT DISTINCT batch_date FROM control.loads ORDER BY 1").fetchall()]
+    finally:
+        con.close()
+
+
 # ------------------------------------------------------------
 # Users. Demo logins, password is the same as the ID.
 # ------------------------------------------------------------
@@ -247,14 +268,15 @@ def show_login():
 
 def show_bar(user):
     run = st.session_state.get("run")
-    if run and not is_published(run):
-        fresh = '<span class="pk-fresh held"><i></i>Your run was held back, showing sample data</span>'
-    elif run:
+    if run and is_published(run):
         mins = int((time.time() - run.finished_at) // 60)
         ago = "just now" if mins < 1 else f"{mins} min ago"
-        fresh = f'<span class="pk-fresh run"><i></i>Your run, built {ago}</span>'
+        fresh = f'<span class="pk-fresh run"><i></i>Your run added {run.day:%b} {run.day.day}, {ago}</span>'
+    elif run and getattr(run, "mode", "") != "rewrite":
+        fresh = '<span class="pk-fresh held"><i></i>Your run was held back, showing the last good data</span>'
     else:
-        fresh = f'<span class="pk-fresh"><i></i>Sample data, built {built_at():%b %-d}</span>'
+        last = data_through()
+        fresh = f'<span class="pk-fresh"><i></i>Data through {last:%b} {last.day}</span>'
     role = {"Executive": "Executive, all branches",
             "Branch Manager": f"Branch manager, {user.get('city')}",
             "Salesperson": "Salesperson"}[user["role"]]
@@ -420,9 +442,11 @@ def show_manager(user, f):
         sub("Cars on the lot")
         make_filter = f"AND make = '{f['make']}'" if f.get("make") else ""
         st.dataframe(q(f"""
-            SELECT make AS "Make", status AS "Status", COUNT(*) AS "Cars", ROUND(AVG(list_price)) AS "Avg list price ($)"
-            FROM main_silver.stg_vehicles WHERE location_id = '{user['location_id']}' {make_filter}
-            GROUP BY make, status ORDER BY make, status
+            SELECT make AS "Make", COUNT(*) AS "Cars", ROUND(AVG(list_price)) AS "Avg list price ($)",
+                   ROUND(AVG(DATE '{data_through()}' - received_date)) AS "Avg days on lot"
+            FROM main_silver.stg_vehicles
+            WHERE location_id = '{user['location_id']}' AND status <> 'sold' {make_filter}
+            GROUP BY make ORDER BY make
         """), use_container_width=True, hide_index=True)
     with right:
         sub("Service bay")
@@ -478,8 +502,11 @@ def show_salesperson(user, f):
 def business_view(user):
     run = st.session_state.get("run")
     if run and is_published(run):
-        st.markdown(f'<div class="pk-callout">You\'re looking at the data from your own pipeline run '
-                    f'(seed {run.seed}). It disappears when you sign out.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="pk-callout">You\'re looking at your own run: {run.day:%A, %B} {run.day.day} '
+                    f'added on top of the closed history. Every earlier day is exactly as it was. Your run '
+                    f'disappears when you sign out.</div>', unsafe_allow_html=True)
+    elif run and getattr(run, "mode", "") == "rewrite":
+        pass
     elif run:
         st.markdown('<div class="pk-callout bad">Your last run failed its tests, so its business tables '
                     'were held back. This view still shows the last good data, the way a real dashboard '
@@ -498,15 +525,18 @@ def business_view(user):
 # ------------------------------------------------------------
 
 STEP_CODE = {
-    "Generate source data": f"{REPO}/data_generator/generate_data.py",
+    "Export the day": f"{REPO}/sources/dms/dms.py",
     "Plant problems": f"{REPO}/dashboard/pipeline.py",
     "Load raw layer": f"{REPO}/ingestion/ingest_bronze.py",
     "Clean and model with dbt": f"{REPO}/dbt_project/pkomm_motors/models/staging",
     "Run data tests": f"{REPO}/dbt_project/pkomm_motors/models/staging/schema.yml",
     "Build business tables": f"{REPO}/dbt_project/pkomm_motors/models/marts",
+    "Dealer system resends a closed day": f"{REPO}/dashboard/pipeline.py",
+    "Check the closed day": f"{REPO}/dbt_project/pkomm_motors/tests/generic/closed_days_unchanged.sql",
 }
-PLAN = ["Generate source data", "Load raw layer", "Clean and model with dbt",
+PLAN = ["Export the day", "Load raw layer", "Clean and model with dbt",
         "Run data tests", "Build business tables"]
+PLAN_REWRITE = ["Dealer system resends a closed day", "Load raw layer", "Check the closed day"]
 
 
 def steps_html(done, planned):
@@ -515,6 +545,7 @@ def steps_html(done, planned):
     todo = [p for p in planned if p not in names]
     for i, s in enumerate(done, start=1):
         cls, state = ("done", "Done") if s.ok else ("fail", "Failed")
+        state = getattr(s, "state", "") or state
         link = STEP_CODE.get(s.name)
         code = f' &middot; <a href="{link}" target="_blank">code</a>' if link else ""
         rows.append(f'<div class="pk-step {cls}"><div class="n">{i}</div>'
@@ -525,6 +556,46 @@ def steps_html(done, planned):
                     f'<div class="what"><b>{name}</b><span>Waiting</span></div>'
                     f'<div class="t"></div><div class="s"></div></div>')
     return f'<div class="pk-steps">{"".join(rows)}</div>'
+
+
+def ledger_html(closed, loaded, mark=None):
+    """The books: one square per business day, a column per week, Monday at the top.
+    Closed days are filled, the open day is outlined, a day someone tried to change is ringed."""
+    if closed.empty:
+        return ""
+    units = {d.date() if hasattr(d, "date") else d: int(u) for d, u in zip(closed.business_date, closed.units)}
+    first, last = loaded[0], loaded[-1]
+    week = first - timedelta(days=first.weekday())
+    columns = []
+    while week <= last:
+        # Label the first column, and every week that holds the 1st of a month
+        firsts = [week + timedelta(days=k) for k in range(7) if (week + timedelta(days=k)).day == 1]
+        month = (firsts[0] if firsts else week).strftime("%b") if (firsts or not columns) else ""
+        cells = []
+        for k in range(7):
+            day = week + timedelta(days=k)
+            label = f"{day:%a, %b} {day.day}"
+            if day in units:
+                n = units[day]
+                cls = "closed hit" if day == mark else "closed"
+                tip = f"{label}: closed, {n} {'car' if n == 1 else 'cars'} sold"
+            elif first <= day <= last:
+                cls, tip = "open", f"{label}: open until the next day loads"
+            else:
+                cls, tip = "none", ""
+            cells.append(f'<i class="{cls}" title="{tip}"></i>')
+        columns.append(f'<div class="wk"><b>{month}</b>{"".join(cells)}</div>')
+        week += timedelta(days=7)
+    days_col = '<div class="wk dow"><b></b><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span><span>Sun</span></div>'
+    first_closed, last_closed = min(units), max(units)
+    still_open = [d for d in loaded if d not in units]
+    open_txt = " and ".join(f"{d:%b} {d.day}" for d in still_open) or "none"
+    note = (f'{len(units)} closed days, {first_closed:%b} {first_closed.day} to {last_closed:%b} {last_closed.day}. '
+            f'Open: {open_txt}.')
+    return (f'<div class="pk-ledger"><div class="grid">{days_col}{"".join(columns)}</div>'
+            f'<div class="key"><span><i class="closed"></i>Closed</span><span><i class="open"></i>Open</span>'
+            + ('<span><i class="closed hit"></i>Resend refused</span>' if mark else "")
+            + f'<span class="pk-quiet">{note}</span></div></div>')
 
 
 def health_html(run):
@@ -544,21 +615,29 @@ def health_html(run):
 
 def how_it_runs():
     head("How it runs",
-         "Press run and the whole Pkomm Motors pipeline builds from scratch on this server: fresh source "
-         "data, a raw layer, dbt cleaning and models, 23 data tests, and the business tables behind the "
-         "dashboard. Break it does the same, but first slips bad records into the raw files.")
+         "The dealership's books run from August 15 to November 13, 2026, and every day before the last one "
+         "is closed. Press run and this server does what the nightly job does: the dealer system exports "
+         "the next day, it lands in the raw layer, dbt cleans, models and tests it, and if every test passes "
+         "the day before closes for good. Break it slips bad records into that new day. Rewrite the past "
+         "replays the ticket behind problem 001: the dealer system tries to resend a closed day with different "
+         "numbers.")
 
-    a, b, c = st.columns([1.1, 1.1, 2.8])
-    go_run = a.button("Run the pipeline", type="primary", use_container_width=True)
+    a, b, c, d = st.columns([1.15, 1.1, 1.1, 1.65])
+    go_run = a.button("Run the next day", type="primary", use_container_width=True)
     go_break = b.button("Break it, then run", use_container_width=True)
-    with c.expander("Replay a run"):
+    go_rewrite = c.button("Rewrite the past", use_container_width=True)
+    with d.expander("Replay a Break it run"):
         replay = st.number_input("Seed", min_value=1, max_value=99999, value=None, step=1,
-                                 help="The same seed always produces the same data. Leave empty for a new one.")
+                                 help="Picks which records Break it damages. The same seed always breaks "
+                                      "the same records. Leave empty for a new one.")
 
     box = st.empty()
 
-    if go_run or go_break:
-        planned = PLAN[:1] + (["Plant problems"] if go_break else []) + PLAN[1:]
+    if go_run or go_break or go_rewrite:
+        if go_rewrite:
+            planned = PLAN_REWRITE
+        else:
+            planned = PLAN[:1] + (["Plant problems"] if go_break else []) + PLAN[1:]
         live = []
         box.markdown(steps_html(live, planned), unsafe_allow_html=True)
 
@@ -568,7 +647,8 @@ def how_it_runs():
 
         previous = st.session_state.get("run")
         try:
-            result = pipeline.run(seed=int(replay) if replay else None, break_it=go_break, on_step=on_step)
+            result = pipeline.run(seed=int(replay) if replay else None, break_it=go_break,
+                                  rewrite=go_rewrite, on_step=on_step)
         except pipeline.PipelineBusy:
             st.info("Someone else is running the pipeline right now. Give it a few seconds and try again.")
             return
@@ -580,11 +660,33 @@ def how_it_runs():
     if not run:
         box.markdown(steps_html([], PLAN), unsafe_allow_html=True)
         st.markdown('<p class="pk-quiet">Nothing has run yet in your session. Each run takes about '
-                    '10 seconds, uses its own temporary database, and is deleted when you sign out.</p>',
+                    '10 seconds, uses its own copy of the warehouse, and is deleted when you sign out.</p>',
+                    unsafe_allow_html=True)
+        sub("The books")
+        st.markdown(ledger_html(closed_days(pipeline.SAMPLE_DB), loaded_days(pipeline.SAMPLE_DB)),
                     unsafe_allow_html=True)
         return
 
     box.markdown(steps_html(run.steps, [s.name for s in run.steps]), unsafe_allow_html=True)
+
+    if getattr(run, "mode", "") == "rewrite":
+        rw = run.rewrite
+        unit = lambda n: f"{n} {'car' if n == 1 else 'cars'}"
+        tone = "" if rw["refused"] and rw["after"] == rw["before"] else " bad"
+        st.markdown(f'<div class="pk-callout{tone}">The dealer system resent {rw["day"]:%A, %B} {rw["day"].day} '
+                    f'saying {rw["city"]} sold {unit(rw["resent"])}. That day is closed, so the loader refused '
+                    f'the file and nothing changed. This is the ticket behind problem 001, and the old pipeline '
+                    f'would have quietly replaced the day.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<table class="pk-table pk-compare"><tr><th></th><th>Before</th><th>What the resend said</th>'
+            '<th>After</th></tr>'
+            f'<tr><td>{rw["city"]}, {rw["day"]:%B} {rw["day"].day}</td><td class="num">{unit(rw["before"])}</td>'
+            f'<td class="num pk-bad">{unit(rw["resent"])}</td><td class="num pk-ok">{unit(rw["after"])}</td></tr>'
+            '</table>', unsafe_allow_html=True)
+        sub("The books")
+        st.markdown(ledger_html(closed_days(run.db_path), loaded_days(run.db_path), mark=rw["day"]),
+                    unsafe_allow_html=True)
+        return
 
     failed = run.tests_failed
     total = sum(s.seconds for s in run.steps)
@@ -592,12 +694,18 @@ def how_it_runs():
         held = next(s.detail for s in run.steps if s.name == "Build business tables")
         st.markdown(f'<div class="pk-callout bad">{len(failed)} of {len(run.tests)} tests failed, so the '
                     f'business tables were held back ({held.split(": ", 1)[-1]}). The dashboard kept the last '
-                    f'good numbers. That is the quality gate doing its job. Built in {total:.1f}s from seed '
-                    f'{run.seed}.</div>', unsafe_allow_html=True)
+                    f'good numbers, and no day was closed. That is the quality gate doing its job. Ran in '
+                    f'{total:.1f}s, Break it seed {run.seed}.</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="pk-callout">All {len(run.tests)} tests passed. Built in {total:.1f}s from '
-                    f'seed {run.seed}. The Business view now shows this run\'s data.</div>',
-                    unsafe_allow_html=True)
+        newly = run.closed.get("newly") or []
+        closed_txt = " and ".join(f"{d:%B} {d.day}" for d in newly)
+        st.markdown(f'<div class="pk-callout">All {len(run.tests)} tests passed in {total:.1f}s. '
+                    f'{run.day:%B} {run.day.day} is in, {closed_txt or "no day"} closed, and the '
+                    f'{run.closed.get("before_days", 0)} days closed before this run are exactly as they were. '
+                    f'The Business view now shows this run\'s data.</div>', unsafe_allow_html=True)
+
+    sub("The books")
+    st.markdown(ledger_html(closed_days(run.db_path), loaded_days(run.db_path)), unsafe_allow_html=True)
 
     sub("Data health")
     st.markdown(health_html(run), unsafe_allow_html=True)
@@ -626,8 +734,9 @@ def how_it_runs():
 
 PROBLEMS = [
     ("001", "Yesterday's sales changed overnight",
-     "The old generator rebuilt the last 90 days every morning, so closed days kept changing.",
-     "Open", "problems/001-history-rewrites-itself"),
+     "The old generator rebuilt the last 90 days on every run, so closed days kept changing. "
+     "Now the dealer system exports one day at a time and closed days are locked.",
+     "Fixed", "problems/001-history-rewrites-itself"),
     ("002", "The repo that grows every day",
      "A daily job saved the whole database into git, 208 commits and counting.",
      "Open", "problems/002-database-in-git"),

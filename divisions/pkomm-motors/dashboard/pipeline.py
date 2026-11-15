@@ -1,47 +1,53 @@
 """
-Runs the Pkomm Motors pipeline on demand, for the "How it runs" tab.
+Runs one night of the Pkomm Motors pipeline on demand, for the "How it runs" tab.
 
-It uses the same code as the repo: the data generator, the bronze loader
-and the dbt project. Each run gets its own folder and database in /tmp,
-so nothing is saved and visitors never touch each other's data.
+The dashboard ships with a warehouse that holds the business from August 15 to
+November 13, 2026. Every day before November 13 is closed. A run copies that
+warehouse into its own folder in /tmp and does what the nightly job does:
+
+    the dealer system exports the next business day (November 14),
+    the loader adds it to the raw layer,
+    dbt build cleans, tests and models it,
+    and if the build passed, November 13 closes.
+
+Break it plants bad records into that new day before it loads.
+Rewrite the past makes the dealer system resend a closed day with different
+numbers, which the loader refuses.
+
+Nothing is saved, and visitors never touch each other's data.
 """
 
 import os
-import json
 import random
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 import duckdb
-import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIVISION = os.path.dirname(HERE)
-DBT_DIR = os.path.join(DIVISION, "dbt_project", "pkomm_motors")
+sys.path.insert(0, DIVISION)
 
-sys.path.insert(0, os.path.join(DIVISION, "data_generator"))
-sys.path.insert(0, os.path.join(DIVISION, "ingestion"))
+from ingestion import ingest_bronze  # noqa: E402
+from orchestration import nightly  # noqa: E402
+from sources.dms import dms  # noqa: E402
 
-import generate_data  # noqa: E402
-import ingest_bronze  # noqa: E402
+SAMPLE_DB = os.path.join(DIVISION, "pkomm_motors.duckdb")
+DBT_DIR = nightly.DBT_DIR
 
 # Business tables live in models/marts. If a test on anything upstream fails,
-# dbt build skips these, so bad data never reaches what the business reads.
-GOLD = {f[:-4] for f in os.listdir(os.path.join(DBT_DIR, "models", "marts")) if f.endswith(".sql")}
+# dbt build skips them, so bad data never reaches what the business reads.
+GOLD = nightly.GOLD
 
-TABLES = {
-    "locations": "locations.csv",
-    "employees": "employees.csv",
-    "vehicles": "vehicles.csv",
-    "sales_transactions": "sales_transactions.csv",
-    "service_jobs": "service_jobs.csv",
-}
+# The closed day that Rewrite the past tries to change, and the branch it picks on
+REWRITE_DAY = date(2026, 11, 10)
+REWRITE_BRANCH = ("LOC002", "Chicago")
 
 # The free server is small. One run at a time keeps memory in check.
 _run_lock = threading.Lock()
@@ -57,6 +63,7 @@ class Step:
     detail: str = ""
     seconds: float = 0.0
     ok: bool = True
+    state: str = ""  # overrides Done or Failed, e.g. "Refused"
 
 
 @dataclass
@@ -65,10 +72,14 @@ class RunResult:
     db_path: str
     seed: int
     broke_it: bool
+    mode: str = "run"          # run, break or rewrite
+    day: date = None           # the business day this run worked on
     steps: list = field(default_factory=list)
     planted: dict = field(default_factory=dict)
     tests: list = field(default_factory=list)
     health: list = field(default_factory=list)
+    closed: dict = field(default_factory=dict)   # closed days before and after the run
+    rewrite: dict = field(default_factory=dict)  # what Rewrite the past tried and what happened
     finished_at: float = 0.0
     published: bool = False
 
@@ -182,55 +193,62 @@ def table_counts(db_path, schema):
 
 
 # ------------------------------------------------------------
-# dbt
+# Closed days: their numbers before and after a run
 # ------------------------------------------------------------
 
-def _dbt(command, workdir, db_path):
-    """Runs dbt in its own process, like a scheduler would, then reads
-    run_results.json for what happened to each model or test."""
-    target = os.path.join(workdir, "target")
-    args = [
-        sys.executable, "-c", "from dbt.cli.main import cli; cli()",
-        command,
-        "--project-dir", DBT_DIR,
-        "--profiles-dir", DBT_DIR,
-        "--target-path", target,
-        "--log-path", os.path.join(workdir, "logs"),
-        "--no-use-colors",
-    ]
-    env = dict(os.environ, PKOMM_MOTORS_DB=db_path, DBT_SEND_ANONYMOUS_USAGE_STATS="false")
-    proc = subprocess.run(args, env=env, capture_output=True, text=True, timeout=300)
+def closed_snapshot(db_path):
+    """Units and revenue per branch for every closed day, as the gold table shows them."""
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        rows = con.execute("""
+            SELECT g.sale_date, g.location_id, g.units_sold, ROUND(g.daily_revenue, 2)
+            FROM main_gold.daily_sales_by_location g
+            JOIN control.closed_days c ON c.business_date = g.sale_date
+            ORDER BY 1, 2""").fetchall()
+        days = con.execute("SELECT COUNT(*) FROM control.closed_days").fetchone()[0]
+    finally:
+        con.close()
+    return {"days": days, "rows": rows}
 
-    results = []
-    path = os.path.join(target, "run_results.json")
-    if os.path.exists(path):
-        with open(path) as f:
-            for r in json.load(f)["results"]:
-                results.append({
-                    "type": r["unique_id"].split(".")[0],
-                    "name": r["unique_id"].split(".")[2],
-                    "status": r["status"],
-                    "seconds": round(r.get("execution_time") or 0, 2),
-                    "failures": r.get("failures") or 0,
-                })
-    return proc.returncode == 0, results
+
+def next_business_day(db_path):
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        last = con.execute("SELECT MAX(batch_date) FROM control.loads").fetchone()[0]
+    finally:
+        con.close()
+    return last + timedelta(days=1)
+
+
+def units_on(db_path, day, location_id):
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        row = con.execute("""SELECT units_sold, ROUND(daily_revenue, 2) FROM main_gold.daily_sales_by_location
+                             WHERE sale_date = ? AND location_id = ?""", [day, location_id]).fetchone()
+    finally:
+        con.close()
+    return (int(row[0]), float(row[1])) if row else (0, 0.0)
 
 
 # ------------------------------------------------------------
 # The run itself
 # ------------------------------------------------------------
 
-def run(seed=None, break_it=False, on_step=None):
-    """Generate, load, clean, test, build. Calls on_step(Step) as it goes."""
+def _fmt(day):
+    return day.strftime("%A, %B ") + str(day.day)
+
+
+def run(seed=None, break_it=False, rewrite=False, on_step=None):
+    """One night's run, Break it, or Rewrite the past. Calls on_step(Step) as it goes."""
     if not _run_lock.acquire(blocking=False):
         raise PipelineBusy()
 
     seed = seed if seed is not None else random.randint(1, 99999)
     workdir = tempfile.mkdtemp(prefix="pkomm_motors_")
-    raw_path = os.path.join(workdir, "raw")
-    os.makedirs(raw_path)
     db_path = os.path.join(workdir, "pkomm_motors.duckdb")
-    result = RunResult(workdir=workdir, db_path=db_path, seed=seed, broke_it=break_it)
+    source_root = os.path.join(workdir, "source")
+    mode = "rewrite" if rewrite else ("break" if break_it else "run")
+    result = RunResult(workdir=workdir, db_path=db_path, seed=seed, broke_it=break_it and not rewrite, mode=mode)
 
     def record(step):
         result.steps.append(step)
@@ -238,89 +256,144 @@ def run(seed=None, break_it=False, on_step=None):
             on_step(step)
 
     try:
-        # 1. Generate a fresh day of business, seeded so it can be replayed
-        t0 = time.time()
-        # The generator uses three sources of randomness: Python's random,
-        # Faker, and numpy (through pandas .sample). Seed all three.
-        random.seed(seed)
-        np.random.seed(seed)
-        generate_data.fake.seed_instance(seed)
-        locations = generate_data.generate_locations()
-        employees = generate_data.generate_employees()
-        vehicles = generate_data.generate_vehicles()
-        sales = generate_data.generate_sales(employees, vehicles, days_back=90)
-        jobs = generate_data.generate_service_jobs(employees, vehicles, days_back=90)
-        total = sum(len(d) for d in (locations, employees, vehicles, sales, jobs))
-        record(Step("Generate source data",
-                    f"{total:,} rows across 5 tables, seed {seed}", time.time() - t0))
+        shutil.copy(SAMPLE_DB, db_path)
+        before = closed_snapshot(db_path)
+        result.closed["before_days"] = before["days"]
 
-        if break_it:
-            t0 = time.time()
-            sales, vehicles, result.planted = plant_problems(sales, vehicles, random.Random(seed))
-            record(Step("Plant problems",
-                        f"{sum(result.planted.values())} bad records slipped into the raw files",
-                        time.time() - t0))
-
-        for name, df in [("locations", locations), ("employees", employees),
-                         ("vehicles", vehicles), ("sales_transactions", sales),
-                         ("service_jobs", jobs)]:
-            df.to_csv(os.path.join(raw_path, TABLES[name]), index=False)
-
-        # 2. Load raw files into bronze, exactly as they arrived
-        t0 = time.time()
-        con = duckdb.connect(db_path)
-        ingest_bronze.create_bronze_schema(con)
-        loaded = 0
-        for table, csv_file in TABLES.items():
-            loaded += ingest_bronze.load_table(con, table, csv_file, raw_path=raw_path)
-        con.close()
-        record(Step("Load raw layer", f"{loaded:,} rows kept exactly as they arrived",
-                    time.time() - t0))
-
-        # 3. One dbt build: each model, then its tests, then whatever depends on it.
-        # A failing test stops everything downstream, which is the quality gate.
-        t0 = time.time()
-        _, results = _dbt("build", workdir, db_path)
-        wall = time.time() - t0
-        models = [r for r in results if r["type"] == "model" and r["name"] not in GOLD]
-        gold = [r for r in results if r["type"] == "model" and r["name"] in GOLD]
-        tests = [r for r in results if r["type"] == "test"]
-        result.tests = tests
-
-        t_tests = sum(t["seconds"] for t in tests)
-        t_gold = sum(g["seconds"] for g in gold)
-        built = sum(1 for m in models if m["status"] == "success")
-        # dbt's own start-up time goes on this step, so the steps add up to the wall clock.
-        record(Step("Clean and model with dbt", f"{built} of {len(models)} cleaned tables built",
-                    max(wall - t_tests - t_gold, 0), built == len(models)))
-
-        passed = sum(1 for t in tests if t["status"] == "pass")
-        failed = len(result.tests_failed)
-        skipped = len(result.tests_skipped)
-        if failed:
-            detail = f"{failed} failed, {passed} passed"
-            if skipped:
-                detail += f", {skipped} skipped with their held-back tables"
+        if rewrite:
+            _rewrite_the_past(result, source_root, before, record)
         else:
-            detail = f"{passed} of {len(tests)} tests passed"
-        record(Step("Run data tests", detail, t_tests, failed == 0))
-
-        # 4. What the business sees
-        t0 = time.time()
-        result.health = check_health(db_path, tests)
-        ready = sum(1 for g in gold if g["status"] == "success")
-        result.published = ready == len(GOLD) and failed == 0
-        if result.published:
-            silver = table_counts(db_path, "main_silver")
-            detail = f"{ready} tables ready, {sum(silver.values()):,} clean rows underneath"
-        else:
-            detail = f"Held back: {len(GOLD) - ready} of {len(GOLD)} not rebuilt because tests failed upstream"
-        record(Step("Build business tables", detail, t_gold + time.time() - t0, result.published))
+            _one_night(result, source_root, before, record)
     finally:
         _run_lock.release()
 
     result.finished_at = time.time()
     return result
+
+
+def _one_night(result, source_root, before, record):
+    db_path = result.db_path
+    day = next_business_day(db_path)
+    result.day = day
+
+    # 1. The dealer system exports the day. Same day, same numbers, every time.
+    t0 = time.time()
+    export = dms.export_for(day)
+    sales, vehicles = export["sales_transactions"], export["vehicles"]
+    record(Step("Export the day",
+                f"{_fmt(day)}: {len(sales)} cars sold, {len(export['service_jobs'])} service jobs, "
+                f"{len(vehicles)} lot changes", time.time() - t0))
+
+    if result.broke_it:
+        t0 = time.time()
+        sales, vehicles, result.planted = plant_problems(sales, vehicles, random.Random(result.seed))
+        export = dict(export, sales_transactions=sales, vehicles=vehicles)
+        record(Step("Plant problems",
+                    f"{sum(result.planted.values())} bad records slipped into {_fmt(day)}, seed {result.seed}",
+                    time.time() - t0))
+
+    # 2. Add the day to the raw layer. Closed days are not touched.
+    t0 = time.time()
+    folder = dms.write_day(source_root, day, export)
+    con = duckdb.connect(db_path)
+    counts = ingest_bronze.load_day(con, day, folder)
+    con.close()
+    record(Step("Load raw layer",
+                f"{sum(counts.values()):,} rows added for {day:%B} {day.day}. "
+                f"The {before['days']} closed days before it were not touched", time.time() - t0))
+
+    # 3. One dbt build: each model, then its tests, then whatever depends on it.
+    t0 = time.time()
+    _, results, _ = nightly.dbt("build", db_path, result.workdir)
+    wall = time.time() - t0
+    models = [r for r in results if r["type"] == "model" and r["name"] not in GOLD]
+    gold = [r for r in results if r["type"] == "model" and r["name"] in GOLD]
+    tests = [r for r in results if r["type"] == "test"]
+    result.tests = tests
+
+    t_tests = sum(t["seconds"] for t in tests)
+    t_gold = sum(g["seconds"] for g in gold)
+    built = sum(1 for m in models if m["status"] == "success")
+    record(Step("Clean and model with dbt", f"{built} of {len(models)} cleaned tables built",
+                max(wall - t_tests - t_gold, 0), built == len(models)))
+
+    passed = sum(1 for t in tests if t["status"] == "pass")
+    failed = len(result.tests_failed)
+    skipped = len(result.tests_skipped)
+    if failed:
+        detail = f"{failed} failed, {passed} passed"
+        if skipped:
+            detail += f", {skipped} skipped with their held-back tables"
+    else:
+        detail = f"{passed} of {len(tests)} tests passed, including the closed-days check"
+    record(Step("Run data tests", detail, t_tests, failed == 0))
+
+    # 4. What the business sees, and closing yesterday
+    t0 = time.time()
+    result.health = check_health(db_path, tests)
+    ready = sum(1 for g in gold if g["status"] == "success")
+    result.published = ready == len(GOLD) and failed == 0
+    if result.published:
+        con = duckdb.connect(db_path)
+        newly = ingest_bronze.close_days_before(con, day)
+        con.close()
+        after = closed_snapshot(db_path)
+        unchanged = after["rows"][:len(before["rows"])] == before["rows"]
+        result.closed.update(after_days=after["days"], newly=newly, unchanged=unchanged)
+        closed_txt = ", ".join(f"{d:%B} {d.day}" for d in newly) or "nothing new"
+        detail = (f"{ready} tables ready. Closed {closed_txt}. "
+                  f"{before['days']} earlier closed days checked: "
+                  f"{'none changed' if unchanged else 'SOME CHANGED'}")
+    else:
+        result.closed.update(after_days=before["days"], newly=[], unchanged=True)
+        detail = f"Held back: {len(GOLD) - ready} of {len(GOLD)} not rebuilt because tests failed upstream"
+    record(Step("Build business tables", detail, t_gold + time.time() - t0, result.published))
+
+
+def _rewrite_the_past(result, source_root, before, record):
+    """The old problem, on purpose: the dealer system resends a closed day with different numbers."""
+    db_path = result.db_path
+    day = REWRITE_DAY
+    loc_id, city = REWRITE_BRANCH
+    result.day = day
+    units_before, revenue_before = units_on(db_path, day, loc_id)
+
+    t0 = time.time()
+    export = dms.export_for(day)
+    sales = export["sales_transactions"]
+    branch = sales[sales.location_id == loc_id]
+    # The resend loses one of the branch's sales, the way a rebuilt history quietly changes
+    resent = sales.drop(branch.index[-1:]) if len(branch) else sales
+    export = dict(export, sales_transactions=resent)
+    units_resent = int((resent.location_id == loc_id).sum())
+    record(Step("Dealer system resends a closed day",
+                f"{_fmt(day)} sent again. It now says {city} sold {units_resent} "
+                f"{'car' if units_resent == 1 else 'cars'}, not {units_before}", time.time() - t0))
+
+    t0 = time.time()
+    folder = os.path.join(source_root, "resend", f"day={day.isoformat()}")
+    os.makedirs(folder)
+    for name, df in export.items():
+        df.to_csv(os.path.join(folder, f"{name}.csv"), index=False)
+    con = duckdb.connect(db_path)
+    try:
+        ingest_bronze.load_day(con, day, folder)
+        refused, why = False, "The loader accepted it"
+    except ingest_bronze.ClosedDayError as e:
+        refused, why = True, str(e)
+    finally:
+        con.close()
+    record(Step("Load raw layer", why, time.time() - t0, refused, "Refused" if refused else "Accepted"))
+
+    t0 = time.time()
+    units_after, revenue_after = units_on(db_path, day, loc_id)
+    after = closed_snapshot(db_path)
+    record(Step("Check the closed day",
+                f"{city}, {day:%B} {day.day}: {units_before} before, {units_after} after. "
+                f"All {after['days']} closed days {'unchanged' if after['rows'] == before['rows'] else 'CHANGED'}", time.time() - t0, units_after == units_before))
+    result.rewrite = {"day": day, "city": city, "before": units_before, "resent": units_resent,
+                      "after": units_after, "revenue": revenue_before, "refused": refused}
+    result.closed.update(after_days=after["days"], newly=[], unchanged=after["rows"] == before["rows"])
 
 
 def cleanup(result):

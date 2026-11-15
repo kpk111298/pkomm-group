@@ -1,9 +1,10 @@
 # Dashboard and the live pipeline run. Deploy on Python 3.12.
-streamlit>=1.42,<2
-duckdb>=1.2,<2
-pandas>=2.2,<3
-numpy>=1.26,<3
-plotly>=5.24,<7
-faker>=24,<41
-dbt-core>=1.10,<1.11
-dbt-duckdb>=1.10,<1.11
+# duckdb is pinned to the version that wrote pkomm_motors.duckdb.
+duckdb==1.5.6
+pandas==2.3.3
+numpy==2.5.4
+faker==40.54.0
+dbt-core==1.10.23
+dbt-duckdb==1.10.1
+streamlit==1.67.0
+plotly==6.9.0

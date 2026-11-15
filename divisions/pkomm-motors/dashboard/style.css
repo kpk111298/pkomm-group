@@ -151,3 +151,21 @@ a { color: var(--navy); text-decoration-color: var(--gold); text-underline-offse
 .stMarkdown a, .stMarkdown a:visited { color: var(--navy) !important; text-decoration-color: var(--gold) !important; }
 .pk-login { margin-bottom: 22px; }
 .pk-fresh.held i { background: var(--bad); }
+
+/* The books: one square per business day, a column per week, Monday at the top */
+.pk-ledger { margin: 2px 0 8px; }
+.pk-ledger .grid { display: flex; gap: 4px; align-items: flex-start; }
+.pk-ledger .wk { display: grid; grid-template-rows: 16px repeat(7, 13px); gap: 4px; }
+.pk-ledger .wk b { font-weight: 400; font-size: 11.5px; color: var(--ink-3); line-height: 16px; white-space: nowrap; width: 13px; overflow: visible; }
+.pk-ledger .dow { margin-right: 6px; }
+.pk-ledger .dow span { font-size: 11px; line-height: 13px; color: var(--ink-3); }
+.pk-ledger i { display: block; width: 13px; height: 13px; border-radius: 3px; }
+.pk-ledger i.closed { background: var(--navy); }
+.pk-ledger i.open { background: #fff; box-shadow: inset 0 0 0 1.5px var(--gold); }
+.pk-ledger i.hit { box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px var(--bad); }
+.pk-ledger i.none { background: transparent; }
+.pk-ledger .key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+.pk-ledger .key span { display: inline-flex; align-items: center; gap: 7px; }
+.pk-ledger .key i { width: 11px; height: 11px; }
+.pk-compare { max-width: 640px; margin-top: 4px; }
+.pk-compare td.num { font-size: 15px; }
