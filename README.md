@@ -15,7 +15,7 @@ The businesses, customers and numbers are fictional and simulated. The code, tes
 
 | Business | What it does | Code |
 |---|---|---|
-| Pkomm Motors | Five car dealerships with service bays. Raw data in DuckDB, cleaned and modelled with dbt, 23 tests that gate the business tables, and a [live dashboard](https://pkomm-group.streamlit.app) with three role-based views and a Break it button | [divisions/pkomm-motors](divisions/pkomm-motors) |
+| Pkomm Motors | Five car dealerships with service bays. A dealer system that exports one day at a time, closed days that can't change, 24 dbt tests that gate the business tables, and a [live dashboard](https://pkomm-group.streamlit.app) with three role-based views and a Break it button | [divisions/pkomm-motors](divisions/pkomm-motors) |
 | Pkomm Cart | An online store whose orders, payments and shipments change for days after they're placed. A daily incremental pipeline that merges only the rows that changed, 9 end-to-end tests, and a [live dashboard](https://pkomm-group-cart.streamlit.app) that shows any past day's revenue settling | [divisions/pkomm-cart](divisions/pkomm-cart) |
 
 More businesses open one at a time, each when there's a real problem to solve in it.
@@ -24,7 +24,7 @@ More businesses open one at a time, each when there's a real problem to solve in
 
 | # | Problem | Business | Status |
 |---|---|---|---|
-| 001 | [Yesterday's sales changed overnight](problems/001-history-rewrites-itself) | Pkomm Motors | Open |
+| 001 | [Yesterday's sales changed overnight](problems/001-history-rewrites-itself) | Pkomm Motors | Fixed and tested, write-up next |
 | 002 | [The repo that grows every day](problems/002-database-in-git) | Pkomm Motors | Open |
 | 003 | [Late payments flip the revenue number](problems/003-late-arriving-updates) | Pkomm Cart | Fixed, tested and written up |
 
