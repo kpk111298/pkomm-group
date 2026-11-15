@@ -192,6 +192,11 @@ def money(v):
     return f"${v:,.0f}"
 
 
+def money_tile(v):
+    """For the metric tiles, where a full seven-figure number gets cut off."""
+    return f"${v / 1_000_000:,.2f}M" if abs(v) >= 1_000_000 else money(v)
+
+
 def chart(fig, height):
     fig.update_layout(
         height=height, margin=dict(t=8, b=8, l=8, r=8),
@@ -350,7 +355,7 @@ def show_executive(f):
     units, revenue = int(stats.units), stats.revenue
 
     c = st.columns(5)
-    c[0].metric("Revenue", money(revenue), help=DEFINITIONS["revenue"])
+    c[0].metric("Revenue", money_tile(revenue), help=DEFINITIONS["revenue"])
     c[1].metric("Cars sold", f"{units:,}", help=DEFINITIONS["units"])
     c[2].metric("Average deal", money(revenue / units if units else 0), help=DEFINITIONS["avg_deal"])
     c[3].metric("Financed", f"{stats.fin * 100:.0f}%", help=DEFINITIONS["financed"])
@@ -410,11 +415,11 @@ def show_manager(user, f):
                 WHERE location_id = '{user['location_id']}'""")
 
     c = st.columns(4)
-    c[0].metric("Revenue", money(stats.revenue), help=DEFINITIONS["revenue"])
+    c[0].metric("Revenue", money_tile(stats.revenue), help=DEFINITIONS["revenue"])
     c[1].metric("Cars sold", f"{int(stats.units):,}", help=DEFINITIONS["units"])
     if len(tgt):
         t = tgt.iloc[0]
-        c[2].metric("Monthly target", money(t.monthly_target), f"{t.pct_of_target:.0f}% so far this month",
+        c[2].metric("Monthly target", money_tile(t.monthly_target), f"{t.pct_of_target:.0f}% so far this month",
                     delta_color="off", help=DEFINITIONS["target"])
         c[3].metric("This month", "On track" if t.status == "On Track" else "Behind pace", help=DEFINITIONS["on_track"])
 
@@ -471,7 +476,7 @@ def show_salesperson(user, f):
 
     c = st.columns(4)
     c[0].metric("Cars sold", int(s.deals), help=DEFINITIONS["units"])
-    c[1].metric("Revenue", money(s.revenue), help=DEFINITIONS["revenue"])
+    c[1].metric("Revenue", money_tile(s.revenue), help=DEFINITIONS["revenue"])
     c[2].metric("Commission", money(s.revenue * rate), f"{rate * 100:.1f}% rate", delta_color="off",
                 help=DEFINITIONS["commission"])
     c[3].metric("Best sale", money(s.best), help=DEFINITIONS["best"])
