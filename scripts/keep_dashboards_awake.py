@@ -31,9 +31,11 @@ def visit(page, name, url):
         button.first.click()
         woke = True
 
-    # The app runs inside an iframe. Wait until it shows the business name.
+    # The app runs inside an iframe. Wait until it shows the business name on screen
+    # (visible only: the logo's hidden SVG title carries the name too).
     try:
-        page.frame_locator("iframe[title='streamlitApp']").get_by_text(name).first.wait_for(timeout=180_000)
+        app = page.frame_locator("iframe[title='streamlitApp']")
+        app.locator(f"text={name} >> visible=true").first.wait_for(timeout=180_000)
     except PlaywrightTimeout:
         print(f"{name}: did not finish loading in 3 minutes ({url})")
         return False
